@@ -39,9 +39,12 @@ const Navigation: Component = () => {
       <div class="drawer__content flex flex-col gap-2 px-4">
         <div class="hidden w-full items-center justify-center sm:flex">
           <A href="/">
-            <div class="h-7 w-fit items-center justify-center rounded-lg px-4 font-bold">
-              Agn<span class="text-[var(--hl-500)]">ai</span>stic
-            </div>
+            <div class="h-7 w-fit items-center justify-center rounded-lg px-4" style="
+             font-weight: bold;
+             font-size: x-large;
+             margin-bottom: 25px;
+             margin-right: 130px;"
+            >Agn<span class="font-bold text-[var(--hl-500)]">ai</span>stic</div>
           </A>
         </div>
         <Show when={user.loggedIn} fallback={<GuestNavigation />}>
