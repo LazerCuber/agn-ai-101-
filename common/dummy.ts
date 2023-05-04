@@ -20,6 +20,7 @@ export function toChar(name: string): AppSchema.Character {
     },
     updatedAt: '',
     userId: '',
+    favorite: false,
   }
 }
 
@@ -44,6 +45,7 @@ export function toUser(name: string): AppSchema.User {
     kind: 'user',
     koboldUrl: '',
     thirdPartyFormat: 'kobold',
+    thirdPartyPassword: '',
     luminaiUrl: '',
     novelApiKey: '',
     novelModel: NOVEL_MODELS.krake,

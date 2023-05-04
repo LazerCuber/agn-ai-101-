@@ -1,7 +1,6 @@
 import { UnwrapBody, assertValid } from 'frisker'
 import { ADAPTER_LABELS, AIAdapter } from '../../common/adapters'
-import { isLoggedIn } from '../store/api'
-import { Option } from './Select'
+import type { Option } from './Select'
 import { createEffect, onCleanup } from 'solid-js'
 
 type FormRef = {
@@ -61,7 +60,11 @@ export function getForm<T = {}>(evt: Event | HTMLFormElement): T {
 
 type Field = HTMLSelectElement | HTMLInputElement
 
-export function getStrictForm<T extends FormRef>(evt: Event | HTMLFormElement, body: T) {
+export function getStrictForm<T extends FormRef>(
+  evt: Event | HTMLFormElement,
+  body: T,
+  partial?: boolean
+) {
   evt.preventDefault?.()
   const target = evt instanceof HTMLFormElement ? evt : (evt.target as HTMLFormElement)
 
@@ -86,7 +89,7 @@ export function getStrictForm<T extends FormRef>(evt: Event | HTMLFormElement, b
 
   disable()
 
-  assertValid(body, values)
+  assertValid(body, values, partial)
   return values
 }
 
@@ -302,4 +305,10 @@ export const setComponentPageTitle = (newTitle: string) => {
   // updateComponentPageTitle on its own which would change the title without
   // the onCleanup hook.
   return { updateTitle }
+}
+
+export function find<T, K extends keyof T>(values: T[], key: K, val: T[K]): T | undefined {
+  for (const value of values) {
+    if (value[key] === val) return value
+  }
 }

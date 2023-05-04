@@ -1,20 +1,45 @@
-import { useNavigate, useParams } from '@solidjs/router'
+import { A, useNavigate, useParams } from '@solidjs/router'
 import { Component, createEffect, createMemo, createSignal, For, onMount, Show } from 'solid-js'
 import { AllChat, characterStore, chatStore } from '../../store'
 import PageHeader from '../../shared/PageHeader'
-import { Edit, Import, Menu, Plus, Trash } from 'lucide-solid'
+import { Edit, Import, Plus, SortAsc, SortDesc, Trash } from 'lucide-solid'
 import CreateChatModal from './CreateChat'
 import ImportChatModal from './ImportChat'
-import { setComponentPageTitle, toDuration, toEntityMap, toMap } from '../../shared/util'
+import { find, setComponentPageTitle, toDuration, toMap } from '../../shared/util'
 import { ConfirmModal } from '../../shared/Modal'
 import AvatarIcon from '../../shared/AvatarIcon'
-import { DropMenu } from '../../shared/DropMenu'
 import { AppSchema } from '../../../srv/db/schema'
-import Select from '../../shared/Select'
+import Select, { Option } from '../../shared/Select'
 import Divider from '../../shared/Divider'
 import TextInput from '../../shared/TextInput'
+import Button from '../../shared/Button'
+import CharacterSelect from '../../shared/CharacterSelect'
 
 const CACHE_KEY = 'agnai-chatlist-cache'
+
+type SortType =
+  | 'chat-updated'
+  | 'chat-created'
+  | 'character-name'
+  | 'character-created'
+  | 'bot-activity'
+
+type SortDirection = 'asc' | 'desc'
+
+type ListCache = {
+  sort: {
+    field: SortType
+    direction: SortDirection
+  }
+}
+
+const sortOptions = [
+  { value: 'chat-updated', label: 'Chat Activity', kind: 'chat' },
+  { value: 'bot-activity', label: 'Bot Activity', kind: 'chat' },
+  { value: 'chat-created', label: 'Chat Created', kind: 'chat' },
+  { value: 'character-name', label: 'Bot Name', kind: 'bot' },
+  { value: 'character-created', label: 'Bot Created', kind: 'bot' },
+]
 
 const CharacterChats: Component = () => {
   const params = useParams()
@@ -24,27 +49,45 @@ const CharacterChats: Component = () => {
     list: s.characters.list,
     loaded: s.characters.loaded,
   }))
-  const charName = chars.map[params.id]?.name
-  setComponentPageTitle(charName ? `${charName} chat list` : 'Chat list')
 
   const nav = useNavigate()
   const [search, setSearch] = createSignal('')
-  const [charId, setCharId] = createSignal(params.id || '')
+  const [char, setChar] = createSignal<AppSchema.Character | undefined>(
+    params.id ? ({ _id: params.id, name: 'Loading' } as AppSchema.Character) : undefined
+  )
   const [showCreate, setCreate] = createSignal(false)
   const [showImport, setImport] = createSignal(false)
-  const [view, setView] = createSignal(cache.view)
-  const [allview, setAllview] = createSignal(cache.all)
+  const [sortField, setSortField] = createSignal(cache.sort.field)
+  const [sortDirection, setSortDirection] = createSignal(cache.sort.direction)
 
-  const updateView = (next: { value: string }) => {
-    const id = charId()
-    if (!id) {
-      setAllview(next.value)
-      saveListCache({ all: next.value })
-    } else {
-      setView(next.value)
-      saveListCache({ view: next.value })
+  createEffect(() => {
+    if (!params.id) {
+      setComponentPageTitle(`Chats`)
+      return
     }
-  }
+
+    const char = chars.map[params.id]
+    setComponentPageTitle(char ? `${char.name} chats` : 'Chats')
+    if (char) setChar(char)
+  })
+
+  createEffect(() => {
+    const next = {
+      sort: {
+        field: sortField(),
+        direction: sortDirection(),
+      },
+    }
+
+    saveListCache(next)
+  })
+
+  createEffect(() => {
+    if (!char()) return
+    if (sortField() === 'character-name' || sortField() === 'character-created') {
+      setSortField('chat-updated')
+    }
+  })
 
   const state = chatStore((s) => {
     const list = s.all?.chats || []
@@ -53,7 +96,7 @@ const CharacterChats: Component = () => {
   })
 
   const chats = createMemo(() => {
-    const id = charId()
+    const id = char()?._id
     return state.list.filter((chat) => {
       const char = chars.map[chat.characterId]
       const trimmed = search().trim().toLowerCase()
@@ -64,14 +107,6 @@ const CharacterChats: Component = () => {
           char?.description?.toLowerCase().includes(trimmed))
       )
     })
-  })
-  const charItems = createMemo(() => {
-    return [{ label: 'All', value: '' }].concat(
-      chars.list
-        .slice()
-        .sort((l, r) => (l.name > r.name ? 1 : l.name === r.name ? 0 : -1))
-        .map((ch) => ({ label: ch.name, value: ch._id }))
-    )
   })
 
   onMount(() => {
@@ -107,20 +142,6 @@ const CharacterChats: Component = () => {
     </>
   )
 
-  const viewTypes = createMemo(() => {
-    const all = [
-      { label: 'Chat activity - DESC', value: 'chat-desc' },
-      { label: 'Chat activity - ASC', value: 'chat-asc' },
-      { label: 'Bot name - ASC', value: 'name-asc' },
-      { label: 'Bot name - DESC', value: 'name-desc' },
-      { label: 'Bot age - ASC', value: 'age-desc' },
-      { label: 'Bot age - DESC', value: 'age-desc' },
-    ]
-
-    if (charId()) return all.slice(0, 2)
-    return all
-  })
-
   return (
     <div class="flex flex-col gap-2">
       <PageHeader
@@ -134,44 +155,45 @@ const CharacterChats: Component = () => {
         }
       />
 
-      <div class="mx-auto flex h-full w-full flex-col justify-between sm:py-2">
-        <div class="flex w-full items-center justify-between rounded-md">
-          <div class="mb-2 flex w-full flex-wrap items-center">
-            <div class="mr-1">
-              <TextInput
-                fieldName="search"
-                class="max-w-[160px]"
-                onKeyUp={(ev) => setSearch(ev.currentTarget.value)}
-                placeholder="Search..."
-              />
-            </div>
+      <div class="mb-2 flex justify-between">
+        <div class="flex flex-wrap">
+          <div class="m-1 ml-0">
+            <TextInput
+              fieldName="search"
+              placeholder="Search..."
+              onKeyUp={(ev) => setSearch(ev.currentTarget.value)}
+            />
+          </div>
+
+          <CharacterSelect
+            fieldName="char"
+            items={chars.list}
+            emptyLabel="All Characters"
+            value={char()}
+            onChange={setChar}
+          />
+
+          <div class="flex flex-wrap">
             <Select
-              fieldName="char"
-              items={charItems()}
-              value={charId()}
-              onChange={(next) => setCharId(next.value)}
-              class="my-1 mr-1 max-w-[160px]"
+              class="m-1 bg-[var(--bg-600)]"
+              fieldName="sortBy"
+              items={sortOptions.filter((opt) => (char() ? opt.kind === 'chat' : true))}
+              value={sortField()}
+              onChange={(next) => setSortField(next.value as SortType)}
             />
 
-            <Show when={charId()}>
-              <Select
-                fieldName="view"
-                items={viewTypes()}
-                onChange={updateView}
-                value={view()}
-                class="mx-1 my-1"
-              />
-            </Show>
-
-            <Show when={!charId()}>
-              <Select
-                fieldName="allview"
-                items={viewTypes()}
-                onChange={updateView}
-                value={allview()}
-                class="my-1"
-              />
-            </Show>
+            <div class="py-1">
+              <Button
+                schema="secondary"
+                class="rounded-xl"
+                onClick={() => {
+                  const next = sortDirection() === 'asc' ? 'desc' : 'asc'
+                  setSortDirection(next as SortDirection)
+                }}
+              >
+                {sortDirection() === 'asc' ? <SortAsc /> : <SortDesc />}
+              </Button>
+            </div>
           </div>
         </div>
       </div>
@@ -181,21 +203,18 @@ const CharacterChats: Component = () => {
         <Chats
           chats={chats()}
           chars={chars.map}
-          view={charId() ? view() : allview()}
-          charId={charId()}
+          sortField={sortField()}
+          sortDirection={sortDirection()}
+          char={char()}
         />
       </Show>
       <CreateChatModal
         show={showCreate()}
         close={() => setCreate(false)}
-        char={chars.map[charId()]}
+        char={char()}
         id={params.id}
       />
-      <ImportChatModal
-        show={showImport()}
-        close={() => setImport(false)}
-        char={chars.map[charId()]}
-      />
+      <ImportChatModal show={showImport()} close={() => setImport(false)} char={char()} />
     </div>
   )
 }
@@ -203,20 +222,18 @@ const CharacterChats: Component = () => {
 const Chats: Component<{
   chats: AllChat[]
   chars: Record<string, AppSchema.Character>
-  view: string
-  charId: string
+  sortField: SortType
+  sortDirection: SortDirection
+  char?: AppSchema.Character
 }> = (props) => {
-  const nav = useNavigate()
   const [showDelete, setDelete] = createSignal('')
 
   const groups = createMemo(() => {
-    const chars = Object.values(props.chars)
-    if (!props.charId) return groupAndSort(chars, props.chats, props.view)
-    return groupAndSort(
-      chars.filter((ch) => ch._id === props.charId),
-      props.chats,
-      props.view
-    )
+    let chars = Object.values(props.chars)
+    if (props.char) {
+      chars = [props.char]
+    }
+    return groupAndSort(chars, props.chats, props.sortField, props.sortDirection)
   })
 
   const confirmDelete = () => {
@@ -238,9 +255,9 @@ const Chats: Component<{
               <For each={chats}>
                 {(chat) => (
                   <div class="flex w-full justify-between gap-2 rounded-lg bg-[var(--bg-800)] p-1 hover:bg-[var(--bg-700)]">
-                    <div
+                    <A
                       class="flex w-10/12 cursor-pointer gap-2 sm:w-11/12"
-                      onClick={() => nav(`/chat/${chat._id}`)}
+                      href={`/chat/${chat._id}`}
                     >
                       <div class="flex items-center justify-center">
                         <AvatarIcon
@@ -262,8 +279,8 @@ const Chats: Component<{
                           Updated {toDuration(new Date(chat.updatedAt))} ago.
                         </div>
                       </div>
-                    </div>
-                    <div class="flex items-center" onClick={() => setDelete(chat._id)}>
+                    </A>
+                    <div class="flex items-center px-2" onClick={() => setDelete(chat._id)}>
                       <Trash size={20} class="icon-button" />
                     </div>
                   </div>
@@ -299,48 +316,94 @@ export default CharacterChats
 
 type ChatGroup = { char: AppSchema.Character | null; chats: AppSchema.Chat[] }
 
+function getChatSortableValue(chat: AppSchema.Chat, field: SortType) {
+  switch (field) {
+    case 'chat-updated':
+      return chat.updatedAt
+    case 'chat-created':
+      return chat.createdAt
+    default:
+      return 0
+  }
+}
+
+function getChatSortFunction(field: SortType, direction: SortDirection) {
+  return (left: AppSchema.Chat, right: AppSchema.Chat) => {
+    const mod = direction === 'asc' ? 1 : -1
+    const l = getChatSortableValue(left, field)
+    const r = getChatSortableValue(right, field)
+    return l > r ? mod : l === r ? 0 : -mod
+  }
+}
+
+function getCharacterSortableValue(char: AppSchema.Character, field: SortType) {
+  switch (field) {
+    case 'character-name':
+      return char.name.toLowerCase()
+
+    case 'character-created':
+      return char.createdAt
+
+    case 'bot-activity':
+      return char.updatedAt
+
+    default:
+      return 0
+  }
+}
+
+function getCharSortFunction(type: SortType, direction: SortDirection) {
+  return (left: AppSchema.Character, right: AppSchema.Character) => {
+    const mod = direction === 'asc' ? 1 : -1
+    const l = getCharacterSortableValue(left, type)
+    const r = getCharacterSortableValue(right, type)
+    return l > r ? mod : l === r ? 0 : -mod
+  }
+}
+
 function groupAndSort(
   allChars: AppSchema.Character[],
   allChats: AppSchema.Chat[],
-  direction: string
+  type: SortType,
+  direction: SortDirection
 ): Array<ChatGroup> {
-  const [kind, dir] = direction.split('-') as ['chat' | 'name' | 'age', 'asc' | 'desc']
-  const mod = dir === 'asc' ? 1 : -1
-
-  if (kind === 'chat') {
-    const sorted = allChats
-      .slice()
-      .sort((l, r) => (l.updatedAt > r.updatedAt ? mod : l.updatedAt === r.updatedAt ? 0 : -mod))
+  if (type === 'chat-updated' || type == 'chat-created') {
+    const sorted = allChats.slice().sort(getChatSortFunction(type, direction))
     return [{ char: null, chats: sorted }]
   }
 
   const groups: ChatGroup[] = []
-  const chars = allChars.slice().sort((left, right) => {
-    const l = kind === 'age' ? left.createdAt : left.name.toLowerCase()
-    const r = kind === 'age' ? right.createdAt : right.name.toLowerCase()
-    return l > r ? mod : l === r ? 0 : -mod
+  const sortedChats = allChats.slice().sort(getChatSortFunction('chat-updated', 'desc'))
+
+  const chars = allChars.slice().map((char) => {
+    if (type !== 'bot-activity') return char
+    const first = find(sortedChats, 'characterId', char._id)
+    return { ...char, updatedAt: first?.updatedAt || new Date(0).toISOString() }
   })
 
+  chars.sort(getCharSortFunction(type, direction))
+
   for (const char of chars) {
-    const chats = allChats.filter((ch) => ch.characterId === char._id)
+    const chats = allChats
+      .filter((ch) => ch.characterId === char._id)
+      .sort(getChatSortFunction('chat-updated', 'desc'))
     groups.push({ char, chats })
   }
 
   return groups
 }
 
-function getListCache(): { view: string; all: string } {
+function getListCache(): ListCache {
   const existing = localStorage.getItem(CACHE_KEY)
+  const defaultCache: ListCache = { sort: { field: 'chat-updated', direction: 'desc' } }
 
   if (!existing) {
-    return { view: 'chat-desc', all: 'chat-desc' }
+    return defaultCache
   }
 
-  const parsed = JSON.parse(existing)
-  return { view: 'chat-desc', all: 'chat-desc', ...parsed }
+  return { ...defaultCache, ...JSON.parse(existing) }
 }
 
-function saveListCache(cache: { view?: string; all?: string }) {
-  const prev = getListCache()
-  localStorage.setItem(CACHE_KEY, JSON.stringify({ ...prev, ...cache }))
+function saveListCache(cache: ListCache) {
+  localStorage.setItem(CACHE_KEY, JSON.stringify(cache))
 }

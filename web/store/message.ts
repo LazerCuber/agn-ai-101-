@@ -1,13 +1,15 @@
 import { v4 } from 'uuid'
 import { AppSchema } from '../../srv/db/schema'
 import { EVENTS, events } from '../emitter'
-import { getAssetPrefix, getAssetUrl } from '../shared/util'
+import { getAssetUrl } from '../shared/util'
 import { isLoggedIn } from './api'
 import { createStore } from './create'
-import { data } from './data'
 import { getImageData } from './data/chars'
 import { subscribe } from './socket'
 import { toastStore } from './toasts'
+import { GenerateOpts, msgsApi } from './data/messages'
+import { imageApi } from './data/image'
+import { localApi } from './data/storage'
 
 type ChatId = string
 
@@ -17,7 +19,7 @@ export type MsgState = {
   msgs: AppSchema.ChatMessage[]
   partial?: string
   retrying?: AppSchema.ChatMessage
-  waiting?: string
+  waiting?: { chatId: string; mode?: GenerateOpts['kind']; userId?: string }
   retries: Record<string, string[]>
   nextLoading: boolean
   showImage?: AppSchema.ChatMessage
@@ -70,7 +72,7 @@ export const msgStore = createStore<MsgState>(
 
       const before = msg.createdAt
 
-      const res = await data.msg.getMessages(activeChatId, before)
+      const res = await msgsApi.getMessages(activeChatId, before)
       yield { nextLoading: false }
       if (res.result && res.result.messages.length) {
         return { msgs: res.result.messages.concat(msgs) }
@@ -90,7 +92,7 @@ export const msgStore = createStore<MsgState>(
       const prev = msgs.find((m) => m._id === msgId)
       if (!prev) return toastStore.error(`Cannot find message`)
 
-      const res = await data.msg.editMessage(prev, msg)
+      const res = await msgsApi.editMessage(prev, msg)
       if (res.error) {
         toastStore.error(`Failed to update message: ${res.error}`)
       }
@@ -108,11 +110,11 @@ export const msgStore = createStore<MsgState>(
       }
 
       const [_, replace] = msgs.slice(-2)
-      yield { partial: '', waiting: chatId, retrying: replace }
+      yield { partial: '', waiting: { chatId, mode: 'continue' }, retrying: replace }
 
       addMsgToRetries(replace)
 
-      const res = await data.msg.generateResponseV2({ kind: 'continue' })
+      const res = await msgsApi.generateResponseV2({ kind: 'continue' })
 
       if (res.error) {
         toastStore.error(`Generation request failed: ${res.error}`)
@@ -123,11 +125,6 @@ export const msgStore = createStore<MsgState>(
     },
 
     async *retry({ msgs }, chatId: string, onSuccess?: () => void) {
-      if (msgs.length < 3) {
-        toastStore.error(`Cannot retry: Not enough messages`)
-        return
-      }
-
       if (!chatId) {
         toastStore.error('Could not send message: No active chat')
         yield { partial: undefined }
@@ -135,11 +132,11 @@ export const msgStore = createStore<MsgState>(
       }
 
       const [_, replace] = msgs.slice(-2)
-      yield { partial: '', waiting: chatId, retrying: replace }
+      yield { partial: '', waiting: { chatId, mode: 'retry' }, retrying: replace }
 
       addMsgToRetries(replace)
 
-      const res = await data.msg.generateResponseV2({ kind: 'retry' })
+      const res = await msgsApi.generateResponseV2({ kind: 'retry' })
 
       yield { msgs: msgs.slice(0, -1) }
 
@@ -158,19 +155,35 @@ export const msgStore = createStore<MsgState>(
       }
 
       const msg = msgs[msgIndex]
-      msgStore.send(chatId, msg.msg, true)
+      msgStore.send(chatId, msg.msg, 'retry')
     },
-    async *send({ msgs }, chatId: string, message: string, retry: boolean, onSuccess?: () => void) {
+    async *selfGenerate({ activeChatId }) {
+      msgStore.send(activeChatId, '', 'self')
+    },
+    async *send(
+      { msgs },
+      chatId: string,
+      message: string,
+      mode: 'send' | 'retry' | 'self',
+      onSuccess?: () => void
+    ) {
       if (!chatId) {
         toastStore.error('Could not send message: No active chat')
         yield { partial: undefined }
         return
       }
-      yield { partial: '', waiting: chatId }
+      yield { partial: '', waiting: { chatId, mode } }
 
-      const res = retry
-        ? await data.msg.generateResponseV2({ kind: 'retry' })
-        : await data.msg.generateResponseV2({ kind: 'send', text: message })
+      switch (mode) {
+        case 'self':
+        case 'retry':
+          var res = await msgsApi.generateResponseV2({ kind: mode })
+          break
+
+        case 'send':
+          var res = await msgsApi.generateResponseV2({ kind: 'send', text: message })
+          break
+      }
 
       if (res.error) {
         toastStore.error(`Generation request failed: ${res.error}`)
@@ -199,7 +212,7 @@ export const msgStore = createStore<MsgState>(
       }
 
       const deleteIds = msgs.slice(index).map((m) => m._id)
-      const res = await data.msg.deleteMessages(activeChatId, deleteIds)
+      const res = await msgsApi.deleteMessages(activeChatId, deleteIds)
 
       if (res.error) {
         return toastStore.error(`Failed to delete messages: ${res.error}`)
@@ -208,9 +221,9 @@ export const msgStore = createStore<MsgState>(
     },
     async *createImage({ activeChatId }, messageId?: string) {
       const onDone = (image: string) => handleImage(activeChatId, image)
-      yield { waiting: activeChatId }
+      yield { waiting: { chatId: activeChatId, mode: 'send' } }
 
-      const res = await data.image.generateImage({ messageId, onDone })
+      const res = await imageApi.generateImage({ messageId, onDone })
       if (res.error) {
         yield { waiting: undefined }
         toastStore.error(`Failed to request image: ${res.error}`)
@@ -311,14 +324,14 @@ subscribe(
   }
 )
 
-subscribe('message-created', { msg: 'any', chatId: 'string' }, (body) => {
+subscribe('message-created', { msg: 'any', chatId: 'string', generate: 'boolean?' }, (body) => {
   const { msgs, activeChatId } = msgStore.getState()
   if (activeChatId !== body.chatId) return
   const msg = body.msg as AppSchema.ChatMessage
 
   // If the message is from a user don't clear the "waiting for response" flags
   const nextMsgs = msgs.concat(msg)
-  if (msg.userId) {
+  if (msg.userId && !body.generate) {
     msgStore.setState({ msgs: nextMsgs })
   } else {
     msgStore.setState({
@@ -329,7 +342,7 @@ subscribe('message-created', { msg: 'any', chatId: 'string' }, (body) => {
   }
 
   if (!isLoggedIn()) {
-    data.local.saveMessages(body.chatId, nextMsgs)
+    localApi.saveMessages(body.chatId, nextMsgs)
   }
 
   addMsgToRetries(msg)
@@ -375,16 +388,23 @@ subscribe('message-retrying', { chatId: 'string', messageId: 'string' }, (body) 
     msgs: msgs.slice(0, -1),
     partial: '',
     retrying: replace,
-    waiting: body.chatId,
+    waiting: { chatId: body.chatId, mode: 'retry' },
   })
 })
 
-subscribe('message-creating', { chatId: 'string' }, (body) => {
-  const { waiting, activeChatId, retries } = msgStore.getState()
-  if (body.chatId !== activeChatId) return
+subscribe(
+  'message-creating',
+  { chatId: 'string', senderId: 'string?', mode: 'string?' },
+  (body) => {
+    const { waiting, activeChatId, retries } = msgStore.getState()
+    if (body.chatId !== activeChatId) return
 
-  msgStore.setState({ waiting: activeChatId, partial: '' })
-})
+    msgStore.setState({
+      waiting: { chatId: activeChatId, mode: body.mode as any, userId: body.senderId },
+      partial: '',
+    })
+  }
+)
 
 subscribe('message-horde-eta', { eta: 'number', queue: 'number' }, (body) => {
   toastStore.normal(`Queue: ${body.queue}`)
@@ -403,11 +423,11 @@ subscribe(
 
     const next = msgs.filter((m) => m._id !== retrying?._id).concat(body.msg)
 
-    const chats = data.local.loadItem('chats')
-    data.local.saveChats(
-      data.local.replace(body.chatId, chats, { updatedAt: new Date().toISOString() })
+    const chats = localApi.loadItem('chats')
+    localApi.saveChats(
+      localApi.replace(body.chatId, chats, { updatedAt: new Date().toISOString() })
     )
-    data.local.saveMessages(body.chatId, next)
+    localApi.saveMessages(body.chatId, next)
 
     addMsgToRetries(body.msg)
 
@@ -424,6 +444,8 @@ subscribe(
  * This may consume an annoying amount of memory if a user does not refresh often
  */
 function addMsgToRetries(msg: Pick<AppSchema.ChatMessage, '_id' | 'msg'>) {
+  if (!msg) return
+
   const { retries } = msgStore.getState()
 
   if (!retries[msg._id]) {
